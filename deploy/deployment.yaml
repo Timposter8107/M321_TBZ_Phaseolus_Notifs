@@ -34,6 +34,10 @@ spec:
               value: http://keycloak.infra.svc.cluster.local/realms/phaseolus
             - name: Keycloak__PublicAuthority
               value: http://localhost:8180/realms/phaseolus # browser-reachable via `kubectl port-forward svc/keycloak 8180:80`; update once a real ingress hostname exists
+            - name: OTEL_SERVICE_NAME
+              value: beannotifs
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: http://tempo.infra.svc.cluster.local:4317
           livenessProbe:
             httpGet:
               path: /healthz/live

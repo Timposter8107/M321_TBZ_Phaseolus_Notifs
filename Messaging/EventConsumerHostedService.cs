@@ -1,7 +1,10 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Options;
+using OpenTelemetry;
+using OpenTelemetry.Context.Propagation;
 using RabbitMQ.Client;
 using RabbitMQ.Client.Events;
 
@@ -18,6 +21,11 @@ public class EventConsumerHostedService : BackgroundService
 {
     private const int MaxDeliveryAttempts = 5;
     private const string RetryCountHeader = "x-retry-count";
+
+    // otel-tracing plan Step 3: manual propagation (see OrderBeans'/PayBeancoins'
+    // EventPublisher.cs for why). Notifs has no EventPublisher -- this is the
+    // chain's end, consume-only, so this is the only ActivitySource it needs.
+    private static readonly ActivitySource ActivitySource = new("BeanNotifs");
 
     private readonly IConnection _connection;
     private readonly IModel _channel;
@@ -101,6 +109,19 @@ public class EventConsumerHostedService : BackgroundService
             return;
         }
 
+        // otel-tracing plan Step 3: extract the traceparent Pay's/Cooker's
+        // EventPublisher injected into the AMQP headers, so this consume span links
+        // back to the originating trace instead of starting a disconnected one.
+        var parentContext = Propagators.DefaultTextMapPropagator.Extract(
+            default, ea.BasicProperties.Headers, ExtractTraceHeaderValue);
+        Baggage.Current = parentContext.Baggage;
+
+        using var activity = ActivitySource.StartActivity(
+            $"consume {binding.RoutingKey}", ActivityKind.Consumer, parentContext.ActivityContext);
+        activity?.SetTag("messaging.system", "rabbitmq");
+        activity?.SetTag("messaging.destination", binding.RoutingKey);
+        activity?.SetTag("order.id", envelope.OrderId);
+
         try
         {
             await binding.Handler(envelope);
@@ -131,6 +152,16 @@ public class EventConsumerHostedService : BackgroundService
 
             _channel.BasicPublish(RabbitMqOptions.ExchangeName, binding.RoutingKey, props, ea.Body);
         }
+    }
+
+    private static IEnumerable<string> ExtractTraceHeaderValue(IDictionary<string, object>? headers, string key)
+    {
+        if (headers is not null && headers.TryGetValue(key, out var value) && value is byte[] bytes)
+        {
+            return new[] { Encoding.UTF8.GetString(bytes) };
+        }
+
+        return Enumerable.Empty<string>();
     }
 
     private static int GetRetryCount(IBasicProperties properties)

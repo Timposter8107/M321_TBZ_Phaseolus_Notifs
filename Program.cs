@@ -1,12 +1,37 @@
+using System.Diagnostics;
 using System.Security.Claims;
 using System.Text.Json;
 using BeanNotifs.HealthChecks;
 using BeanNotifs.Messaging;
 using BeanNotifs.Models;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using OpenTelemetry.Trace;
 using Prometheus;
 
 var builder = WebApplication.CreateBuilder(args);
+
+// otel-tracing plan Step 3/Q4: surfaces the active trace/span ID in log scopes
+// (Console:IncludeScopes in appsettings.json renders them) so a trace can be
+// cross-referenced against kubectl logs / Loki without a UI click-through.
+builder.Logging.Configure(options =>
+{
+    options.ActivityTrackingOptions = ActivityTrackingOptions.TraceId
+        | ActivityTrackingOptions.SpanId
+        | ActivityTrackingOptions.ParentId;
+});
+
+// otel-tracing plan Step 3: AddSource("BeanNotifs") picks up the manual
+// consume-side span (EventConsumerHostedService.cs, linked to Pay's/Cooker's
+// publish spans via the propagated traceparent header) -- Notifs has no
+// EventPublisher, it's the end of the chain. OTEL_SERVICE_NAME/
+// OTEL_EXPORTER_OTLP_ENDPOINT are set as env vars in deploy/deployment.yaml,
+// read automatically by AddOtlpExporter.
+builder.Services.AddOpenTelemetry()
+    .WithTracing(tracing => tracing
+        .AddAspNetCoreInstrumentation()
+        .AddHttpClientInstrumentation()
+        .AddSource("BeanNotifs")
+        .AddOtlpExporter());
 
 builder.Services.Configure<RabbitMqOptions>(builder.Configuration.GetSection(RabbitMqOptions.SectionName));
 builder.Services.AddSingleton<NotificationStore>();
